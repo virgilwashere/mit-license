@@ -5,68 +5,71 @@ IMPORTANT:   Set the `github_token` environment variable to a personal access to
 Server port: The `PORT` environment variable can also be set to control the port the server
              should be hosted on.
 */
-const express = require('express');
-const minify = require('express-minify');
-const favicon = require('serve-favicon');
-const postcssMiddleware = require('postcss-middleware');
-const tmpdir = require('os').tmpdir();
-const path = require('path');
+import path, {dirname} from 'node:path'
+import express from 'express'
+import minify from 'express-minify'
+import favicon from 'serve-favicon'
+import postcssMiddleware from 'postcss-middleware'
+import tempDirectory from 'temp-dir'
+import postcssPresetEnv from 'postcss-preset-env'
+import cors from 'cors'
+
+import {fileURLToPath} from 'node:url'
+
+import postRoute from './routes/post.js'
+import getRoute from './routes/get.js'
 
 // Server
-var PORT = process.env.PORT || 8080;
+const PORT = process.env.PORT || 8080
+
+const directoryName = dirname(fileURLToPath(import.meta.url))
 
 // Prepare application
-const app = express();
+const app = express()
 app.use(
   minify({
-    cache: tmpdir,
+    cache: tempDirectory
   })
-);
-app.use(favicon(path.join(__dirname, 'favicon.ico')));
-app.set('views', path.join(__dirname, '/licenses'));
-app.set('view engine', 'ejs');
+)
+app.use(favicon(path.join(directoryName, 'favicon.ico')))
+app.set('views', path.join(directoryName, '/licenses'))
 
 // Setup static files
-app.use('/robots.txt', express.static('robots.txt'));
-app.use('/favicon.ico', express.static(`${__dirname}/favicon.ico`));
+app.use('/robots.txt', express.static('robots.txt'))
+app.use('/favicon.ico', express.static(`${directoryName}/favicon.ico`))
 app.use(
   '/themes',
   postcssMiddleware({
     plugins: [
-      require('postcss-preset-env')({
-        overrideBrowserslist: '>= 0%',
-        stage: 0,
-      }),
+      postcssPresetEnv({
+        overrideBrowserslist: '>= 0%'
+      })
     ],
-    src(req) {
-      return path.join(__dirname, 'themes', req.path);
-    },
+    src(request) {
+      return path.join(directoryName, 'themes', request.path)
+    }
   }),
   express.static('themes')
-);
+)
 
 // Middleware
 
 // CORS
-app.use(require('./middleware/cors'));
+app.use(cors())
 // Parse URL-encoded bodies (as sent by HTML forms)
 app.use(
   express.urlencoded({
-    extended: true,
+    extended: true
   })
-);
+)
 // Parse JSON bodies (as sent by API clients)
-app.use(express.json());
+app.use(express.json())
 
-// Capture the id from the subdomain
-app.use(require('./middleware/load-user'));
-app.use(require('./middleware/load-options'));
-
-// HTTP POST API
-app.post('/', require('./routes/post'));
-app.get('/*', require('./routes/get'));
+// HTTP endpoints
+app.post('/', postRoute)
+app.get('/*', getRoute)
 
 // Start listening for HTTP requests
 app.listen(PORT, () => {
-  console.log(`🚀 on http://localhost:${PORT}`);
-});
+  console.log(`🚀 on http://localhost:${PORT}`)
+})
