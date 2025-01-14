@@ -1,96 +1,134 @@
-const md5 = require('md5');
-const path = require('path');
-const { stripTags, escapeTags } = require('./utils');
+import {fileURLToPath} from 'node:url'
+import path, {dirname} from 'node:path'
+import {htmlEscape, htmlUnescape} from 'escape-goat'
+import stripHtml from 'html-text'
+import is from '@sindresorhus/is'
+import getGravatarUrl from 'gravatar-url'
+import createHtmlElement from 'create-html-element'
+import {renderFile} from 'ejs'
 
-function getCopyrightHTML(user, plain) {
-  let html = '';
+import loadUser from '../lib/load-user.js'
+import loadOptions from '../lib/load-options.js'
 
-  const name =
-    typeof user === 'string'
-      ? user
-      : plain
-      ? user.name || user.copyright
-      : escapeTags(user.name || user.copyright);
+const directoryName = dirname(fileURLToPath(import.meta.url))
 
-  if (user.url) {
-    html = `<a href="${stripTags(user.url)}">${name}</a>`;
-  } else {
-    html = name;
+function getCopyrightName(user, isPlainText) {
+  if (is.string(user)) {
+    return user
   }
 
-  if (user.email) {
-    html += ` &lt;<a href="mailto:${stripTags(user.email)}">${
-      plain ? user.email : escapeTags(user.email)
-    }</a>&gt;`;
-  }
+  const copyright = user.name || user.copyright
 
-  return html;
+  return isPlainText ? copyright : htmlEscape(copyright)
 }
 
-module.exports = (req, res) => {
-  const { user, options } = res.locals;
-  let name;
-  let gravatar;
+function getCopyrightHtml(user, isPlainText) {
+  const name = getCopyrightName(user, isPlainText)
+  let html = user.url ? createHtmlElement({
+    name: 'a',
+    attributes: {
+      href: user.url,
+    },
+    text: name,
+  }) : name
+
+  if (user.email) {
+    html += ` &lt;${createHtmlElement({
+      name: 'a',
+      attributes: {
+        href: `mailto:${user.email}`,
+      },
+      text: user.email,
+    })}&gt;`
+  }
+
+  return html
+}
+
+function getGravatarEmail(user) {
+  if (user.gravatar && user.email) {
+    // Supports regular format
+    return user.email.trim().toLowerCase()
+  }
+
+  if (is.object(user.copyright[0]) && user.gravatar) {
+    // Supports multi-user format
+    return user.copyright[0].email.trim().toLowerCase()
+  }
+}
+
+const removeFalsy = array => array.filter(Boolean)
+
+export default async function getRoute(request, response) {
+  let user
+  try {
+    user = await loadUser(request.hostname)
+  } catch ({message}) {
+    response
+      .status(500)
+      .send(`An internal error occurred - open an issue on https://github.com/remy/mit-license with the following information: ${message}`)
+    return
+  }
+
+  const options = loadOptions(request.url)
+  const year = options.pinnedYear
+    ? options.pinnedYear
+    : removeFalsy([options.startYear, options.endYear]).join('-')
+  const license = (options.license || user.license).toUpperCase()
+  const format = options.format || user.format
+  const isPlainText = format !== 'html'
+
+  let name
 
   // No error and valid
   if (user.copyright) {
-    if (typeof user.copyright === 'string') {
-      name = getCopyrightHTML(user, options.format !== 'html');
-    } else if (user.copyright.every(val => typeof val === 'string')) {
+    if (is.string(user.copyright)) {
+      name = getCopyrightHtml(user, isPlainText)
+    } else if (is.array(user.copyright) && user.copyright.every(value => is.string(value))) {
       // Supports: ['Remy Sharp', 'Richie Bendall']
-      name = user
-        .map(_ => (options.format !== 'html' ? _ : escapeTags(_)))
-        .join(', ');
+      name = user.copyright.map(value => (isPlainText ? value : htmlEscape(value))).join(', ')
     } else {
-      name = user.copyright.map(getCopyrightHTML).join(', ');
+      name = user.copyright.map(value => getCopyrightHtml(value)).join(', ')
     }
   }
 
-  if (user.gravatar && user.email) {
-    // Supports regular format
-    gravatar = `<img id="gravatar" alt="Profile image" src="https://www.gravatar.com/avatar/${md5(
-      user.email.trim().toLowerCase()
-    )}" />`;
-  } else if (typeof user.copyright[0] === 'object' && user.gravatar) {
-    // Supports multi-user format
-    gravatar = `<img id="gravatar" alt="Profile image" src="https://www.gravatar.com/avatar/${md5(
-      user.copyright[0].email.trim().toLowerCase()
-    )}" />`;
+  let gravatar
+  const gravatarEmail = getGravatarEmail(user)
+
+  if (gravatarEmail) {
+    gravatar = createHtmlElement({
+      name: 'img',
+      attributes: {
+        id: 'gravatar',
+        alt: 'Profile image',
+        src: getGravatarUrl(gravatarEmail),
+      },
+    })
   }
 
-  const year = options.pinnedYear
-    ? options.pinnedYear
-    : [options.startYear, options.endYear].filter(Boolean).join('-');
-  const license = (options.license || user.license || 'MIT').toUpperCase();
-  const format = options.format || user.format || 'html';
-
-  const args = {
-    info: `${year} ${name}`,
-    theme: user.theme || 'default',
-    gravatar,
-  };
-
-  const filename = path.join(__dirname, '..', 'licenses', license);
-  req.app.render(filename, args, (error, content) => {
-    if (error) {
-      res.status(500).send(error);
-      return;
-    }
+  try {
+    const content = await renderFile(path.join(directoryName, '..', 'licenses', `${license}.ejs`), {
+      info: `${year} ${name}`,
+      theme: user.theme || 'default',
+      gravatar,
+    })
 
     if (format === 'txt') {
-      const plain = content.match(/<article>(.*)<\/article>/ms)[1];
+      const {articleContent} = content.match(/<article>(?<articleContent>.*)<\/article>/ms).groups
 
-      res
+      response
         .set('Content-Type', 'text/plain; charset=UTF-8')
-        .send(stripTags(plain).trim());
-      return;
+        .send(htmlUnescape(stripHtml(articleContent)).trim())
+      return
     }
 
     if (format === 'html') {
-      res.send(content);
-      return;
+      response.send(content)
+      return
     }
 
-    res.json({ ...user, ...options });
-  });
-};
+    response.json({...user, ...options})
+  } catch (error) {
+    response.status(500).send(error)
+  }
+}
