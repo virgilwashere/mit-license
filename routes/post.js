@@ -1,107 +1,123 @@
-const fs = require('fs');
-const path = require('path');
-const { promisify } = require('util');
-const access = promisify(fs.access);
-const writeFile = promisify(fs.writeFile);
-const btoa = require('btoa');
-const { version } = require(path.join(__dirname, '..', 'package.json'));
-const github = require('@octokit/rest')({
+import path, {dirname} from 'node:path'
+import {fileURLToPath} from 'node:url'
+import process from 'node:process'
+import toBase64 from 'btoa'
+import {readPackage} from 'read-pkg'
+import size from 'any-size'
+import {Octokit} from '@octokit/rest'
+import {pathExists} from 'path-exists'
+import {writeJsonFile} from 'write-json-file'
+import yn from 'yn'
+import is from '@sindresorhus/is'
+import isDomainId from '../utils/is-domain-id.js'
+
+const directoryName = dirname(fileURLToPath(import.meta.url))
+
+const {version} = await readPackage()
+
+const github = new Octokit({
   // GitHub personal access token
   auth: process.env.github_token,
   // User agent with version from package.json
   userAgent: `mit-license v${version}`,
-});
-const { validDomainId } = require('./utils');
+})
 
-function getUserData({ query, body }) {
+function getUserData({query, body}) {
   // If query parameters provided
-  if (Object.keys(query).length > 0) return query;
+  if (size(query) > 0) {
+    return query
+  }
+
   // If the data parsed as {'{data: "value"}': ''}
-  const keys = Object.keys(body);
-  if (keys.length === 1 && !Object.values(body)[0]) return JSON.parse(keys[0]);
+  if (size(body) === 1 && !Object.values(body)[0]) {
+    return JSON.parse(Object.keys(body)[0])
+  }
+
   // Fallback
-  return body;
+  return body
 }
 
-// HTTP POST API
-module.exports = async (req, res) => {
-  const { hostname } = req;
+export default async function postRoute(request, response) {
+  const {hostname} = request
+
   // Get different parts of hostname (example: remy.mit-license.org -> ['remy', 'mit-license', 'org'])
-  const params = hostname.split('.');
+  const parameters = hostname.split('.')
 
   // This includes the copyright, year, etc.
-  const userData = getUserData(req);
+  const userData = getUserData(request)
 
   // If there isn't enough part of the hostname
-  if (params.length < 2) {
-    res.status(400).send('Please specify a subdomain in the URL.');
-    return;
+  if (parameters.length < 2) {
+    response.status(400).send('Please specify a subdomain in the URL.')
+    return
   }
 
   // Extract the name from the URL
-  const id = params[0];
+  const [id] = parameters
 
-  if (!validDomainId(id)) {
+  if (!isDomainId(id)) {
     // Return a vague error intentionally
-    res
+    response
       .status(400)
       .send(
-        'User already exists - to update values, please send a pull request on https://github.com/remy/mit-license'
-      );
+        'User already exists - to update values, please send a pull request on https://github.com/remy/mit-license',
+      )
 
-    return;
+    return
   }
 
-  try {
-    // Check if the user file exists in the users directory
-    await access(path.join(__dirname, '..', 'users', `${id}.json`));
-    res
+  // Check if the user file exists in the users directory
+  if (await pathExists(path.join(directoryName, '..', 'users', `${id}.json`))) {
+    response
       .status(409)
       .send(
-        'User already exists - to update values, please send a pull request on https://github.com/remy/mit-license'
-      );
-    return;
-  } catch ({ code, message }) {
-    if (code !== 'ENOENT') {
-      res
-        .code(500)
+        'User already exists - to update values, please send a pull request on https://github.com/remy/mit-license',
+      )
+    return
+  }
+
+  if (userData.gravatar) {
+    // Parse the string version of a boolean or similar
+    userData.gravatar = yn(userData.gravatar, {lenient: true})
+    if (is.undefined(userData.gravatar)) {
+      response
+        .status(400)
         .send(
-          `An internal error occurred - open an issue on https://github.com/remy/mit-license with the following information: ${message}`
-        );
-      return;
+          'The "gravatar" JSON property must be a boolean.',
+        )
+      return
     }
   }
 
   // File doesn't exist
   // If copyright property and key doesn't exist
   if (!userData.copyright) {
-    res.status(400).send('JSON requires "copyright" property and value');
-    return;
+    response.status(400).send('JSON requires "copyright" property and value')
+    return
   }
 
   try {
-    const fileContent = JSON.stringify(userData, 0, 2);
+    await Promise.all([
+      github.repos.createOrUpdateFileContents({
+        owner: 'remy',
+        repo: 'mit-license',
+        path: `users/${id}.json`,
+        message: `Automated creation of user ${id}.`,
+        content: toBase64(JSON.stringify(userData, 0, 2)),
+        committer: {
+          name: 'MIT License Bot',
+          email: 'remy@leftlogic.com',
+        },
+      }),
+      writeJsonFile(path.join(directoryName, '..', 'users', `${id}.json`), userData, {indent: undefined}),
+    ])
 
-    await github.repos.createOrUpdateFile({
-      owner: 'remy',
-      repo: 'mit-license',
-      path: `users/${id}.json`,
-      message: `chore: Automated creation of user ${id}.`,
-      content: btoa(fileContent),
-      committer: {
-        name: 'MIT License Bot',
-        email: 'remy@leftlogic.com',
-      },
-    });
-
-    writeFile(path.join(__dirname, '..', 'users', `${id}.json`), fileContent);
-
-    res.status(201).send(`MIT license page created: https://${hostname}`);
-  } catch (err) {
-    res
+    response.status(201).send(`MIT license page created: https://${hostname}`)
+  } catch {
+    response
       .status(500)
       .send(
-        `Unable to create new user - please send a pull request on https://github.com/remy/mit-license`
-      );
+        'Unable to create new user - please send a pull request on https://github.com/remy/mit-license',
+      )
   }
-};
+}

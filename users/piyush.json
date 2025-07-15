@@ -1,7 +1,8 @@
 {
-  "copyright": "Piyush Sonar, http://piyush-sonar.tk",
-  "url": "http://piyush-soanr.tk",
-  "email": "sonar0324@gmail.com",
+  "copyright": "Piyush Sonar, https://piyushsonar.in",
+  "url": "https://piyushsonar.in",
+  "email": "contact@piyushsonar.in",
   "gravatar": true,
-  "theme": "material"
+  "format": "html",
+  "theme": "ubuntu mono"
 }
